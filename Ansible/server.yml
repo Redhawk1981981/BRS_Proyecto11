@@ -1,0 +1,128 @@
+- hosts: victima
+  become: yes
+  vars:
+    ssh_port: 22
+    web_port: 80
+
+  tasks:
+    - name: Actualizar APT
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Instalar paquetes básicos
+      apt:
+        name:
+          - openssh-server
+          - ufw
+          - suricata
+          - suricata-update
+          - nginx
+          - curl
+        state: latest
+
+    - name: Habilitar y arrancar el servicio SSH
+      systemd:
+        name: ssh
+        enabled: yes
+        state: started
+
+    - name: Configurar SSH para key auth
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Restart SSH
+
+    - name: Resetear UFW y establecer política por defecto a deny
+      ufw:
+        state: reset
+        policy: deny
+
+    - name: Permitir puerto SSH en UFW
+      ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+
+    - name: Permitir puerto HTTP en UFW
+      ufw:
+        rule: allow
+        port: "{{ web_port }}"
+        proto: tcp
+
+    - name: Obtener interfaz de red principal
+      shell: ip route show default | awk '/default/ {print $5}'
+      register: default_interface
+      changed_when: false
+
+    - name: Configurar Suricata con interfaz dinámica
+      lineinfile:
+        path: /etc/default/suricata
+        regexp: '^SURICATA_ARGS='
+        line: 'SURICATA_ARGS="-i {{ default_interface.stdout }} --user suricata --group suricata --af-packet"'
+      notify: Restart Suricata
+
+    - name: Configurar capacidades de red para Suricata
+      command: setcap cap_net_raw,cap_net_admin=eip /usr/bin/suricata
+
+    - name: Actualizar reglas de Suricata con suricata-update
+      command: suricata-update
+      notify: Restart Suricata
+
+    - name: Verificar configuración de Suricata
+      command: suricata -T -c /etc/suricata/suricata.yaml
+      register: suricata_test
+      changed_when: "'Configuration test was successful' in suricata_test.stdout"
+
+    - name: Habilitar y arrancar el servicio Nginx
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+
+    - name: Desplegar página web estática
+      copy:
+        dest: /var/www/html/index.html
+        content: "<h1>Servidor Víctima - Prueba de Seguridad</h1>"
+      notify: Restart Nginx
+
+    - name: Habilitar y arrancar el servicio Suricata
+      systemd:
+        name: suricata
+        enabled: yes
+        state: started
+
+    # BLOQUE UFW REFORZADO PARA PASAR LOS CONTROLES INSPEC
+    - name: Habilitar UFW de forma no interactiva
+      command: ufw --force enable
+
+    - name: Permitir puerto SSH en UFW
+      ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+
+    - name: Permitir puerto HTTP en UFW
+      ufw:
+        rule: allow
+        port: "{{ web_port }}"
+        proto: tcp
+
+    - name: Recargar UFW para aplicar reglas
+      command: ufw reload
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
+    - name: Restart Suricata
+      service:
+        name: suricata
+        state: restarted
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
